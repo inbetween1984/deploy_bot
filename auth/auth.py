@@ -91,9 +91,11 @@ class Auth:
             target_chat_id = int(context.args[0])
             permissions = ",".join(context.args[1:])
             valid_permissions = [
-                "deploy", "containers_list", "containers_start", "containers_stop",
-                "containers_remove", "logs_view", "logs_monitor",
-                "backups_create", "backups_download", "backups_restore", "admin"
+                "deploy",
+                "containers_list", "containers_start", "containers_stop", "containers_remove",
+                "logs_view", "logs_monitor",
+                "backups_create", "backups_download", "backups_restore",
+                "admin"
             ]
             if not all(p in valid_permissions for p in permissions.split(",")):
                 await update.message.reply_text(f"Неверные права. Доступные: {', '.join(valid_permissions)}")

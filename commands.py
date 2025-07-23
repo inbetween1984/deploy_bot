@@ -1,9 +1,12 @@
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from auth.auth import Auth
+from backups.backups import handle_backup, handle_restore, handle_list_backups, handle_download
 from containers.containers import handle_containers, handle_start, handle_stop, handle_remove, handle_container_logs, \
     handle_stats
 from deploy.deploy import handle_deploy
+from files.files import handle_upload, handle_download_file
+from logs.logs import handle_logs, handle_tail, handle_monitor_logs, handle_stop_monitoring
 from utils.telegram import send_unauthorized_message
 
 
@@ -69,3 +72,13 @@ def register_commands(application: Application):
     application.add_handler(CommandHandler('remove', handle_remove))
     application.add_handler(CommandHandler('logs', handle_container_logs))
     application.add_handler(CommandHandler('stats', handle_stats))
+    application.add_handler(CommandHandler('backup', handle_backup))
+    application.add_handler(CommandHandler('restore', handle_restore))
+    application.add_handler(CommandHandler('list_backups', handle_list_backups))
+    application.add_handler(CommandHandler('download', handle_download))
+    application.add_handler(CommandHandler("log_logs", handle_logs))
+    application.add_handler(CommandHandler("tail", handle_tail))
+    application.add_handler(CommandHandler("monitor_logs", handle_monitor_logs))
+    application.add_handler(CommandHandler("stop_monitoring", handle_stop_monitoring))
+    application.add_handler(MessageHandler(filters.Document.ALL & filters.CaptionRegex(r'^/upload\s+\S+$'), handle_upload))
+    application.add_handler(CommandHandler("download_file", handle_download_file))
