@@ -7,6 +7,13 @@ async def send_unauthorized_message(update: Update):
 
 async def send_paginated_message(update: Update, text: str, max_length: int = 4000):
     """Отправляет длинное сообщение, разбивая его на части, если превышает max_length."""
+    if not isinstance(text, str):
+        await update.message.reply_text("Ошибка: Неверный формат данных для отправки.")
+        return
+
+    if not text.strip():
+        return
+
     if len(text) <= max_length:
         await update.message.reply_text(text)
         return

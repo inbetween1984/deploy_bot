@@ -1,4 +1,5 @@
 import shlex
+import logging
 from telegram import Update
 from telegram.ext import ContextTypes
 from auth.auth import Auth
@@ -55,7 +56,6 @@ async def handle_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         if ssh:
             ssh.close()
-
 
 async def handle_tail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает команду /tail <path> [n]."""
@@ -117,51 +117,9 @@ async def handle_tail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if ssh:
             ssh.close()
 
-
-async def monitor_logs_job(context: ContextTypes.DEFAULT_TYPE):
-    """Фоновая задача для мониторинга логов."""
-    user_id = context.job.data["user_id"]
-    path = context.job.data["path"]
-    chat_id = context.job.data["chat_id"]
-
-    ssh = None
-    try:
-        ssh = connect_ssh(VPS_HOST, VPS_USERNAME, VPS_PASSWORD, VPS_KEY_PATH)
-
-        command = f'test -f {shlex.quote(path)} && test -r {shlex.quote(path)} && echo "readable"'
-        stdout, stderr, exit_status = execute_ssh_command(ssh, command)
-        if exit_status != 0 or stdout.strip() != "readable":
-            await context.bot.send_message(chat_id=chat_id,
-                                           text=f"Ошибка: Файл {path} не существует или недоступен для чтения: {stderr}")
-            context.job.schedule_removal()
-            context.user_data.pop(f"monitor_job_{user_id}", None)
-            return
-
-        command = f'tail -n 10 {shlex.quote(path)}'
-        stdout, stderr, exit_status = execute_ssh_command(ssh, command)
-        if exit_status != 0:
-            await context.bot.send_message(chat_id=chat_id, text=f"Ошибка при мониторинге лога: {stderr}")
-            context.job.schedule_removal()
-            context.user_data.pop(f"monitor_job_{user_id}", None)
-            return
-
-        last_output = context.job.data.get("last_output", "")
-        if stdout.strip() and stdout != last_output:
-            new_lines = stdout.strip().split("\n")[-10:]
-            response = f"Новые строки в {path}:\n" + "\n".join(new_lines)
-            await send_paginated_message(context.bot, chat_id, response)
-            context.job.data["last_output"] = stdout
-    except Exception as e:
-        await context.bot.send_message(chat_id=chat_id, text=f"Ошибка при мониторинге: {str(e)}")
-        context.job.schedule_removal()
-        context.user_data.pop(f"monitor_job_{user_id}", None)
-    finally:
-        if ssh:
-            ssh.close()
-
-
 async def handle_monitor_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает команду /monitor_logs <path> [interval]."""
+    logger.debug(f"Получена команда /monitor_logs: args={context.args}, user_id={update.message.from_user.id}")
     auth = Auth()
     if not auth.is_authorized_user(update.message.from_user.id):
         await update.message.reply_text("Вы не авторизованы. Обратитесь к администратору.")
@@ -191,6 +149,8 @@ async def handle_monitor_logs(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     user_id = update.message.from_user.id
+    if context.user_data is None:
+        context.user_data = {}
     if f"monitor_job_{user_id}" in context.user_data:
         await update.message.reply_text(
             "У вас уже запущен мониторинг логов. Остановите его с помощью /stop_monitoring.")
@@ -209,7 +169,7 @@ async def handle_monitor_logs(update: Update, context: ContextTypes.DEFAULT_TYPE
         job = context.job_queue.run_repeating(
             monitor_logs_job,
             interval=interval,
-            data={"user_id": user_id, "path": path, "chat_id": update.message.chat_id, "last_output": ""},
+            data={"user_id": user_id, "path": path, "chat_id": update.message.chat_id, "last_output": "", "update": update},
             name=f"monitor_logs_{user_id}"
         )
         context.user_data[f"monitor_job_{user_id}"] = job
@@ -221,6 +181,64 @@ async def handle_monitor_logs(update: Update, context: ContextTypes.DEFAULT_TYPE
         if ssh:
             ssh.close()
 
+async def monitor_logs_job(context: ContextTypes.DEFAULT_TYPE):
+    """Фоновая задача для мониторинга логов."""
+    if not hasattr(context, "job") or not context.job:
+        return
+
+    user_id = context.job.data["user_id"]
+    path = context.job.data["path"]
+    chat_id = context.job.data["chat_id"]
+    update = context.job.data["update"]
+    last_output = context.job.data.get("last_output", "")
+
+    ssh = None
+    try:
+        ssh = connect_ssh(VPS_HOST, VPS_USERNAME, VPS_PASSWORD, VPS_KEY_PATH)
+
+        command = f'test -f {shlex.quote(path)} && test -r {shlex.quote(path)} && echo "readable"'
+        stdout, stderr, exit_status = execute_ssh_command(ssh, command)
+        if exit_status != 0 or stdout.strip() != "readable":
+            await update.message.reply_text(f"Ошибка: Файл {path} не существует или недоступен для чтения: {stderr}")
+            context.job.schedule_removal()
+            if context.user_data is not None:
+                context.user_data.pop(f"monitor_job_{user_id}", None)
+            return
+
+        command = f'tail -n 10 {shlex.quote(path)}'
+        stdout, stderr, exit_status = execute_ssh_command(ssh, command)
+        if exit_status != 0:
+            await update.message.reply_text(f"Ошибка при мониторинге лога: {stderr}")
+            context.job.schedule_removal()
+            if context.user_data is not None:
+                context.user_data.pop(f"monitor_job_{user_id}", None)
+            return
+
+        if not isinstance(stdout, str):
+            await update.message.reply_text(f"Ошибка при мониторинге: Неверный формат вывода лога")
+            context.job.schedule_removal()
+            if context.user_data is not None:
+                context.user_data.pop(f"monitor_job_{user_id}", None)
+            return
+
+        if not stdout.strip():
+            return
+        if stdout == last_output:
+            return
+
+        new_lines = stdout.strip().split("\n")[-10:]
+        response = f"Новые строки в {path}:\n" + "\n".join(new_lines)
+        await send_paginated_message(update, response)
+        context.job.data["last_output"] = stdout
+
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка при мониторинге: {str(e)}")
+        context.job.schedule_removal()
+        if context.user_data is not None:
+            context.user_data.pop(f"monitor_job_{user_id}", None)
+    finally:
+        if ssh:
+            ssh.close()
 
 async def handle_stop_monitoring(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает команду /stop_monitoring."""
@@ -234,11 +252,19 @@ async def handle_stop_monitoring(update: Update, context: ContextTypes.DEFAULT_T
 
     user_id = update.message.from_user.id
     job_key = f"monitor_job_{user_id}"
-    if job_key not in context.user_data:
+    if context.user_data is None or job_key not in context.user_data:
         await update.message.reply_text("Нет активного мониторинга логов.")
         return
 
     job = context.user_data[job_key]
-    job.schedule_removal()
-    context.user_data.pop(job_key)
-    await update.message.reply_text("Мониторинг логов остановлен.")
+    try:
+        if job and job.enabled:
+            job.schedule_removal()
+            context.user_data.pop(job_key, None)
+            await update.message.reply_text("Мониторинг логов остановлен.")
+        else:
+            context.user_data.pop(job_key, None)
+            await update.message.reply_text("Мониторинг уже был остановлен или не существует.")
+    except Exception as e:
+        context.user_data.pop(job_key, None)
+        await update.message.reply_text(f"Ошибка при остановке мониторинга: {str(e)}")
